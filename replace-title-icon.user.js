@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Replace Title Icon
-// @version      1.0.0
+// @version      1.0.1
 // @author       You
 // @match        *://*/*
 // @run-at       document-start
@@ -45,23 +45,24 @@
   );
 
   /************************************************
+   * 工具
+   ************************************************/
+
+  // Firefox 在 document-start 阶段 document.head 可能还不存在，
+  // 直接使用会抛异常（Chrome/Edge 此时已经有了）
+  function getHead() {
+    return document.head || document.querySelector("head");
+  }
+
+  /************************************************
    * 修改标题
    ************************************************/
 
   function applyTitle() {
+    if (!getHead()) return;
+
     if (document.title !== TITLE) {
       document.title = TITLE;
-    }
-
-    let title = document.querySelector("title");
-
-    if (!title) {
-      title = document.createElement("title");
-      document.head.appendChild(title);
-    }
-
-    if (title.textContent !== TITLE) {
-      title.textContent = TITLE;
     }
   }
 
@@ -70,10 +71,12 @@
    ************************************************/
 
   function applyIcon() {
-    if (!document.head) return;
+    const head = getHead();
+
+    if (!head) return;
 
     // 删除网站原来的 favicon
-    document.querySelectorAll('link[rel*="icon"]').forEach((link) => {
+    head.querySelectorAll('link[rel*="icon" i]').forEach((link) => {
       if (link.id !== "gm_blank_icon") {
         link.remove();
       }
@@ -86,11 +89,10 @@
       icon.id = "gm_blank_icon";
       icon.rel = "icon";
       icon.type = "image/png";
-      document.head.appendChild(icon);
-    }
-
-    if (icon.href !== IMG_ICON) {
-      icon.href = IMG_ICON;
+      icon.setAttribute("href", IMG_ICON);
+      head.appendChild(icon);
+    } else if (icon.getAttribute("href") !== IMG_ICON) {
+      icon.setAttribute("href", IMG_ICON);
     }
   }
 
@@ -103,41 +105,87 @@
 
     applyTitle();
     applyIcon();
+
+    // head 可能后出现 / 被替换，确保监听始终挂在当前的 head 上
+    ensureIconObserver();
+  }
+
+  /************************************************
+   * MutationObserver
+   ************************************************/
+
+  let scheduled = false;
+
+  function scheduleApply() {
+    if (!enabled || scheduled) return;
+
+    scheduled = true;
+
+    setTimeout(() => {
+      scheduled = false;
+      apply();
+    }, 0);
+  }
+
+  let iconObserver = null;
+  let iconObserverTarget = null;
+
+  function ensureIconObserver() {
+    const head = getHead();
+
+    if (!head) return;
+    if (iconObserver && iconObserverTarget === head) return;
+
+    if (iconObserver) iconObserver.disconnect();
+
+    iconObserver = new MutationObserver(scheduleApply);
+    iconObserverTarget = head;
+    iconObserver.observe(head, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["href", "rel"],
+    });
   }
 
   /************************************************
    * 初始化
    ************************************************/
 
-  apply();
+  function start() {
+    // 等待 documentElement 出现再挂 observer：
+    // Firefox 的 document-start 阶段它可能是 null，observe(null) 会抛异常
+    if (!document.documentElement) {
+      const rootWatcher = new MutationObserver(() => {
+        if (!document.documentElement) return;
+        rootWatcher.disconnect();
+        start();
+      });
 
-  document.addEventListener("DOMContentLoaded", apply);
-  window.addEventListener("load", apply);
+      rootWatcher.observe(document, { childList: true });
 
-  /************************************************
-   * 监听 title
-   ************************************************/
+      return;
+    }
 
-  new MutationObserver(() => {
-    if (!enabled) return;
-    applyTitle();
-  }).observe(document.documentElement, {
-    subtree: true,
-    childList: true,
-    characterData: true,
-  });
+    apply();
 
-  /************************************************
-   * 监听 favicon
-   ************************************************/
+    // 监听 title
+    new MutationObserver(scheduleApply).observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
 
-  new MutationObserver(() => {
-    if (!enabled) return;
-    requestAnimationFrame(applyIcon);
-  }).observe(document.head || document.documentElement, {
-    subtree: true,
-    childList: true,
-    attributes: true,
-    attributeFilter: ["href", "rel"],
-  });
+    // 监听 favicon
+    ensureIconObserver();
+
+    // 兜底
+    document.addEventListener("DOMContentLoaded", apply);
+    window.addEventListener("load", apply);
+    window.addEventListener("pageshow", apply);
+  }
+
+  if (!enabled) return;
+
+  start();
 })();
