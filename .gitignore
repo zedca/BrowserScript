@@ -1,0 +1,5 @@
+# Playwright MCP 的页面快照，属于本地调试产物
+.playwright-mcp/
+
+# macOS
+.DS_Store
