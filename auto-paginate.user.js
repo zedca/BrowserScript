@@ -2,7 +2,7 @@
 // @name         Auto Paginate
 // @name:zh-CN   网页自动翻页
 // @namespace    https://github.com/zedca/BrowserScript/
-// @version      1.1.2
+// @version      1.1.3
 // @description  Auto-load the next page of results when scrolling to the bottom (Google search built in, more sites via adapters)
 // @description:zh-CN  滚动到底部时自动加载下一页结果；内置 Google 搜索，可按模板扩展其他站点
 // @author       You
@@ -20,6 +20,7 @@
 // @connect      raw.githubusercontent.com
 // @connect      github.com
 // @connect      cdn.jsdelivr.net
+// @connect      purge.jsdelivr.net
 // @run-at       document-idle
 // @noframes
 // @downloadURL  https://github.com/zedca/BrowserScript/raw/main/auto-paginate.user.js
@@ -1000,15 +1001,20 @@
   const SCRIPT_PAGE =
     "https://github.com/zedca/BrowserScript/raw/main/auto-paginate.user.js";
 
+  const JSDELIVR_SCRIPT =
+    "https://cdn.jsdelivr.net/gh/zedca/BrowserScript@main/auto-paginate.user.js";
+  const PURGE_URL =
+    "https://purge.jsdelivr.net/gh/zedca/BrowserScript@main/auto-paginate.user.js";
+
   // 取新版本用：GitHub raw 更新最及时，jsDelivr 当备用线路（分支内容会缓存一段时间）
   const SCRIPT_SOURCES = [
     "https://raw.githubusercontent.com/zedca/BrowserScript/main/auto-paginate.user.js",
     SCRIPT_PAGE,
-    "https://cdn.jsdelivr.net/gh/zedca/BrowserScript@main/auto-paginate.user.js",
+    JSDELIVR_SCRIPT,
   ];
 
   // 油猴没给 GM_info 时用它兜底（记得和头部的 @version 一起改）
-  const FALLBACK_VERSION = "1.1.2";
+  const FALLBACK_VERSION = "1.1.3";
 
   function localVersion() {
     try {
@@ -1065,6 +1071,30 @@
     return null;
   }
 
+  // raw.githubusercontent 的 CDN 会把文件缓存约 5 分钟，刚提交的版本可能还看不到。
+  // 这种情况下让 jsDelivr 刷新一次缓存再取，免得把新版误报成“已是最新”。
+  async function fetchRemoteScriptFresh() {
+    const remote = await fetchRemoteScript();
+
+    if (remote && isNewer(parseVersion(remote.text), localVersion())) {
+      return { ...remote, verified: true };
+    }
+
+    try {
+      await requestText(PURGE_URL);
+
+      const text = await requestText(JSDELIVR_SCRIPT);
+
+      if (text && text.includes("@version")) {
+        return { url: JSDELIVR_SCRIPT, text, verified: true };
+      }
+    } catch (e) {
+      log("更新脚本：刷新 jsDelivr 缓存失败", e);
+    }
+
+    return remote && { ...remote, verified: false };
+  }
+
   function parseVersion(text) {
     const match = /^\/\/\s*@version\s+(\S+)/m.exec(text);
 
@@ -1103,7 +1133,7 @@
   async function checkUpdate() {
     const local = localVersion();
 
-    const remote = await fetchRemoteScript();
+    const remote = await fetchRemoteScriptFresh();
 
     if (!remote) {
       alert(
@@ -1116,7 +1146,11 @@
     const version = parseVersion(remote.text);
 
     if (!version || !isNewer(version, local)) {
-      alert(`已是最新版本：v${local}`);
+      alert(
+        remote.verified
+          ? `已是最新版本：v${local}`
+          : `暂未发现新版本：v${local}\n（GitHub 的文件缓存约 5 分钟，刚提交的版本可能还没生效）`,
+      );
 
       return;
     }
