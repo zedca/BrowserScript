@@ -2,7 +2,7 @@
 // @name         Auto Paginate
 // @name:zh-CN   网页自动翻页
 // @namespace    https://github.com/zedca/BrowserScript/
-// @version      1.1.1
+// @version      1.1.2
 // @description  Auto-load the next page of results when scrolling to the bottom (Google search built in, more sites via adapters)
 // @description:zh-CN  滚动到底部时自动加载下一页结果；内置 Google 搜索，可按模板扩展其他站点
 // @author       You
@@ -1008,7 +1008,7 @@
   ];
 
   // 油猴没给 GM_info 时用它兜底（记得和头部的 @version 一起改）
-  const FALLBACK_VERSION = "1.1.1";
+  const FALLBACK_VERSION = "1.1.2";
 
   function localVersion() {
     try {
