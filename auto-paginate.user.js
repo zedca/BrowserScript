@@ -255,12 +255,21 @@
 
     const known = new Set();
 
+    const knownTexts = new Set();
+
     document.querySelectorAll("style").forEach((style) => {
-      collectSncKeys(style.textContent || "").forEach((key) => known.add(key));
+      const text = style.textContent || "";
+
+      knownTexts.add(text);
+
+      collectSncKeys(text).forEach((key) => known.add(key));
     });
 
     list.forEach((text) => {
-      if (!text || !text.trim() || injectedStyles.has(text)) return;
+      if (!text || !text.trim()) return;
+
+      // 内容和页面上已有的一模一样就不用再来一份
+      if (injectedStyles.has(text) || knownTexts.has(text)) return;
 
       const keys = collectSncKeys(text);
 
@@ -484,12 +493,18 @@
       doc.querySelector('#botstuff a[aria-label="Next"]') ||
       doc.querySelector('#botstuff a[aria-label="下一页"]'),
 
-    // 结果卡片的网格布局按 data-snc 定义在页面 <style> 里，
-    // 把这些样式跟着结果一起搬过来，缩略图与标题才不会重叠
+    // 结果卡片的网格布局写在页面 <style> 里，规则有时按 data-snc 生成，
+    // 有时直接写 .srKDX / grid-template-areas。把这些样式跟着结果一起搬过来，
+    // 缩略图与标题才不会重叠（相同的样式 injectExtraStyles 会自动跳过）
     extraStyles: (doc) =>
       Array.from(doc.querySelectorAll("style"))
         .map((style) => style.textContent || "")
-        .filter((text) => text.includes("[data-snc=")),
+        .filter(
+          (text) =>
+            text.includes("[data-snc=") ||
+            text.includes(".srKDX") ||
+            text.includes("grid-template-areas"),
+        ),
 
     // Google 的结果链接是 /url?q=... 形式
     collectTargets: (node) => {
