@@ -15,6 +15,11 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @grant        GM_openInTab
+// @connect      raw.githubusercontent.com
+// @connect      github.com
+// @connect      cdn.jsdelivr.net
 // @run-at       document-idle
 // @noframes
 // @downloadURL  https://github.com/zedca/BrowserScript/raw/main/auto-paginate.user.js
@@ -988,6 +993,141 @@
   }
 
   /************************************************
+   * 更新
+   ************************************************/
+
+  // 和脚本头部的 @updateURL 保持一致
+  const SCRIPT_PAGE =
+    "https://github.com/zedca/BrowserScript/raw/main/auto-paginate.user.js";
+
+  // 取新版本用：GitHub raw 更新最及时，jsDelivr 当备用线路（分支内容会缓存一段时间）
+  const SCRIPT_SOURCES = [
+    "https://raw.githubusercontent.com/zedca/BrowserScript/main/auto-paginate.user.js",
+    SCRIPT_PAGE,
+    "https://cdn.jsdelivr.net/gh/zedca/BrowserScript@main/auto-paginate.user.js",
+  ];
+
+  // 油猴没给 GM_info 时用它兜底（记得和头部的 @version 一起改）
+  const FALLBACK_VERSION = "1.1.1";
+
+  function localVersion() {
+    try {
+      const version = GM_info && GM_info.script && GM_info.script.version;
+
+      if (version) return version;
+    } catch (e) {
+      log("读取脚本版本失败:", e);
+    }
+
+    return FALLBACK_VERSION;
+  }
+
+  function requestText(url) {
+    return new Promise((resolve, reject) => {
+      // 页面自己的 fetch 会被 Google 的 CSP 拦住，优先走油猴的请求
+      if (typeof GM_xmlhttpRequest !== "function") {
+        fetch(url, { cache: "no-store" })
+          .then((res) =>
+            res.ok
+              ? res.text()
+              : Promise.reject(new Error(`HTTP ${res.status}`)),
+          )
+          .then(resolve, reject);
+
+        return;
+      }
+
+      GM_xmlhttpRequest({
+        method: "GET",
+        url,
+        timeout: 15000,
+        onload: (res) => {
+          if (res.status >= 200 && res.status < 300) resolve(res.responseText);
+          else reject(new Error(`HTTP ${res.status}`));
+        },
+        onerror: () => reject(new Error("网络错误")),
+        ontimeout: () => reject(new Error("超时")),
+      });
+    });
+  }
+
+  async function fetchRemoteScript() {
+    for (const url of SCRIPT_SOURCES) {
+      try {
+        const text = await requestText(url);
+
+        if (text && text.includes("@version")) return { url, text };
+      } catch (e) {
+        log("更新脚本：下载失败", url, e);
+      }
+    }
+
+    return null;
+  }
+
+  function parseVersion(text) {
+    const match = /^\/\/\s*@version\s+(\S+)/m.exec(text);
+
+    return match ? match[1] : "";
+  }
+
+  // 逐段按数字比较，1.2.10 比 1.2.9 新
+  function isNewer(remote, local) {
+    const a = String(remote).split(".");
+    const b = String(local).split(".");
+
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      const x = parseInt(a[i], 10) || 0;
+      const y = parseInt(b[i], 10) || 0;
+
+      if (x !== y) return x > y;
+    }
+
+    return false;
+  }
+
+  function openScriptPage(url) {
+    try {
+      if (typeof GM_openInTab === "function") {
+        GM_openInTab(url, { active: true, insert: true });
+
+        return;
+      }
+    } catch (e) {
+      log("打开脚本页面失败:", e);
+    }
+
+    window.open(url, "_blank");
+  }
+
+  async function checkUpdate() {
+    const local = localVersion();
+
+    const remote = await fetchRemoteScript();
+
+    if (!remote) {
+      alert(
+        `检查更新失败（下载不到脚本）\n当前版本：v${local}\n可以手动打开下面的地址：\n${SCRIPT_PAGE}`,
+      );
+
+      return;
+    }
+
+    const version = parseVersion(remote.text);
+
+    if (!version || !isNewer(version, local)) {
+      alert(`已是最新版本：v${local}`);
+
+      return;
+    }
+
+    if (!confirm(`发现新版本：v${version}（当前 v${local}）\n\n打开安装页更新？`)) return;
+
+    // 直接打开 .user.js，剩下交给油猴的安装页面
+    openScriptPage(SCRIPT_PAGE);
+  }
+
+  /************************************************
    * 菜单
    ************************************************/
 
@@ -1049,6 +1189,8 @@
 
       loadNext();
     });
+
+    safe(`更新脚本（当前 v${localVersion()}）`, checkUpdate);
 
     // 以后适配多个站点时，用来确认当前页面命中的是哪一个
     safe(`当前站点：${adapter ? adapter.name : "未识别"}`, () => {
