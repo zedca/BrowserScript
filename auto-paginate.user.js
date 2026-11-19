@@ -2,7 +2,7 @@
 // @name         Auto Paginate
 // @name:zh-CN   网页自动翻页
 // @namespace    https://github.com/zedca/BrowserScript/
-// @version      1.1.0
+// @version      1.1.1
 // @description  Auto-load the next page of results when scrolling to the bottom (Google search built in, more sites via adapters)
 // @description:zh-CN  滚动到底部时自动加载下一页结果；内置 Google 搜索，可按模板扩展其他站点
 // @author       You
@@ -42,10 +42,12 @@
  *   nextAnchor(doc)  下一页按钮，默认 a[rel="next"] / a.next
  *   nextHref(doc, base)  下一页链接，默认取 nextAnchor 的 href
  *   fetchPage(href)  自定义请求，默认 fetch + credentials: include
+ *   extraStyles(doc)  从远端页面额外带过来的样式（远端页面里的 <style> 内容）
  *   collectTargets(node)  收集用于去重的链接
  *   skipBlock(node)  需要整块跳过的节点（广告、推荐位等）
  *   sanitize(node)   插入前清理，默认去掉 script / 内联事件
  *   fixImages(root)  懒加载图片修复
+ *   fixLayout(nodes)  追加后修正结果排版（样式被站点脚本改写后的兜底）
  */
 
 (function () {
@@ -218,6 +220,70 @@
   }
 
   /************************************************
+   * 附加样式
+   ************************************************/
+
+  // Google 把结果卡片的网格布局规则按 data-snc 写在 <style> 里，
+  // 而且这些 <style> 可能挂在结果容器外面。只追加结果节点会丢掉规则，
+  // 带右侧缩略图的结果就会标题/摘要压到图片上。这里把远端页面的
+  // 布局样式一起搬过来，已经存在的规则不重复注入。
+  function collectSncKeys(text) {
+    const keys = new Set();
+
+    const re = /\[data-snc=["']([^"']+)["']\]/g;
+
+    let match;
+
+    while ((match = re.exec(text))) keys.add(match[1]);
+
+    return keys;
+  }
+
+  const injectedStyles = new Set();
+
+  function injectExtraStyles(doc) {
+    if (!adapter) return;
+
+    let list;
+
+    try {
+      list = adapter.extraStyles(doc) || [];
+    } catch (e) {
+      log("提取附加样式失败:", e);
+      return;
+    }
+
+    const known = new Set();
+
+    document.querySelectorAll("style").forEach((style) => {
+      collectSncKeys(style.textContent || "").forEach((key) => known.add(key));
+    });
+
+    list.forEach((text) => {
+      if (!text || !text.trim() || injectedStyles.has(text)) return;
+
+      const keys = collectSncKeys(text);
+
+      // 页面上已经有这些规则（比如第一页自己的）就不再重复注入
+      if (keys.size > 0 && Array.from(keys).every((key) => known.has(key))) {
+        injectedStyles.add(text);
+
+        return;
+      }
+
+      const style = document.createElement("style");
+
+      style.textContent = text;
+
+      document.head.appendChild(style);
+
+      injectedStyles.add(text);
+
+      keys.forEach((key) => known.add(key));
+    });
+  }
+
+  /************************************************
    * 适配器
    ************************************************/
 
@@ -265,6 +331,8 @@
         def.fetchPage ||
         ((href) => fetch(href, { credentials: "include" })),
 
+      extraStyles: def.extraStyles || (() => []),
+
       collectTargets: def.collectTargets || genericTargets,
 
       skipBlock: def.skipBlock || (() => false),
@@ -272,10 +340,113 @@
       sanitize: def.sanitize || sanitizeNode,
 
       fixImages: def.fixImages || fixLazyImages,
+
+      fixLayout: def.fixLayout || (() => {}),
+
+      observe: def.observe || (() => {}),
     };
   }
 
   const GOOGLE_PAGE_SIZE = 10;
+
+  // Google 的脚本会在结果卡片进入视口后用新的 data-snc 重新渲染它们，
+  // 改写后的卡片找不到对应的 [data-snc] 布局规则，缩略图会和标题叠在一起。
+  // 卡片自身在子元素上写了 grid-area 名字，这里按名字补一份模板兜底。
+  function fixGoogleLayout(nodes) {
+    nodes.forEach((node) => {
+      if (!node.querySelectorAll) return;
+
+      Array.from(node.querySelectorAll(".srKDX")).forEach((grid) => {
+        if (window.getComputedStyle(grid).gridTemplateAreas !== "none") return;
+
+        const areas = Array.from(grid.children)
+          .map((child) => (child.style && child.style.gridArea) || "")
+          .filter(Boolean);
+
+        const textAreas = areas.filter((area) => area !== "Vjbam");
+
+        // 没有右侧缩略图就不需要模板，单列反而正常
+        if (!areas.includes("Vjbam") || textAreas.length === 0) return;
+
+        // 图片那两列必须连成一块矩形，所以正文行先排，
+        // 空一行让图片占满，整行宽的区块（如 gdePb）放最后
+        const rows = textAreas
+          .filter((area) => area !== "gdePb")
+          .map((area) =>
+            Array(10).fill(area).concat(["Vjbam", "Vjbam"]),
+          );
+
+        rows.push(Array(10).fill(".").concat(["Vjbam", "Vjbam"]));
+
+        textAreas
+          .filter((area) => area === "gdePb")
+          .forEach((area) => rows.push(Array(12).fill(area)));
+
+        grid.style.gridTemplateColumns = "repeat(12, minmax(auto, 54px))";
+
+        grid.style.gridTemplateAreas = rows
+          .map((row) => `"${row.join(" ")}"`)
+          .join(" ");
+      });
+    });
+  }
+
+  // data-snc 被改写时补一次排版，防抖避免滚动时频繁触发
+  function watchGoogleLayout(root) {
+    if (!root || !window.MutationObserver) return null;
+
+    let timer = null;
+
+    const observer = new MutationObserver(() => {
+      clearTimeout(timer);
+
+      timer = setTimeout(() => {
+        // Google 重新渲染时会连结果容器一起换掉，旧的监听就失效了
+        if (!root.isConnected) {
+          startObserving();
+
+          return;
+        }
+
+        fixGoogleLayout([root]);
+      }, 300);
+    });
+
+    // 卡片既可能是原地改写 data-snc，也可能整块换掉，两种都要跟
+    observer.observe(root, {
+      attributes: true,
+      attributeFilter: ["data-snc"],
+      childList: true,
+      subtree: true,
+    });
+
+    return observer;
+  }
+
+  // 适配器可以在结果被站点脚本改写时通知我们（目前只有 Google 用）
+  let layoutObserver = null;
+
+  function startObserving() {
+    if (!adapter) return;
+
+    if (layoutObserver) {
+      try {
+        layoutObserver.disconnect();
+      } catch (e) {
+        log("断开排版监听失败:", e);
+      }
+
+      layoutObserver = null;
+    }
+
+    try {
+      const root = adapter.root(document);
+
+      if (root) layoutObserver = adapter.observe(root) || null;
+    } catch (e) {
+      log("注册排版监听失败:", e);
+    }
+  }
 
   const googleAdapter = createAdapter({
     id: "google",
@@ -313,6 +484,13 @@
       doc.querySelector('#botstuff a[aria-label="Next"]') ||
       doc.querySelector('#botstuff a[aria-label="下一页"]'),
 
+    // 结果卡片的网格布局按 data-snc 定义在页面 <style> 里，
+    // 把这些样式跟着结果一起搬过来，缩略图与标题才不会重叠
+    extraStyles: (doc) =>
+      Array.from(doc.querySelectorAll("style"))
+        .map((style) => style.textContent || "")
+        .filter((text) => text.includes("[data-snc=")),
+
     // Google 的结果链接是 /url?q=... 形式
     collectTargets: (node) => {
       const urls = new Set();
@@ -342,6 +520,10 @@
 
     // 广告位不要重复追加
     skipBlock: (node) => ["tads", "tadsb", "bottomads"].includes(node.id),
+
+    fixLayout: fixGoogleLayout,
+
+    observe: watchGoogleLayout,
   });
 
   // 想支持新网站，往这里加适配器即可（顺序即匹配优先级）
@@ -461,6 +643,12 @@
 
     adapter.fixImages(target);
 
+    try {
+      adapter.fixLayout(nodes);
+    } catch (e) {
+      log("修正结果排版失败:", e);
+    }
+
     return nodes.length;
   }
 
@@ -574,6 +762,9 @@
       }
 
       const added = appendResults(source, target, page + 1);
+
+      // 远端页面里影响结果排版的样式要一起带上
+      if (added > 0) injectExtraStyles(remote);
 
       if (added === 0) {
         finished = true;
@@ -955,6 +1146,8 @@
 
       createBadge();
 
+      startObserving();
+
       renderBadge(enabled ? "idle" : "off");
 
       maybeLoad();
@@ -994,6 +1187,8 @@
     injectStyle();
 
     createBadge();
+
+    startObserving();
 
     if (enabled && page >= maxPages) {
       renderBadge("max");
