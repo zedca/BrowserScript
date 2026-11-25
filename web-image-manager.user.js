@@ -1,14 +1,15 @@
 // ==UserScript==
 // @name         Web Image Manager
 // @namespace    http://tampermonkey.net/
-// @version      1.0.1
+// @version      1.0.4
 // @description  稳定版图片/视频/SVG控制
-// @author       cg
+// @author       You
 // @match        *://*/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_unregisterMenuCommand
 // @namespace    https://github.com/zedca/PublicScript/
 // @downloadURL  https://github.com/zedca/PublicScript/raw/main/web-image-manager.user.js
 // @updateURL    https://github.com/zedca/PublicScript/raw/main/web-image-manager.user.js
@@ -194,6 +195,8 @@
       requestAnimationFrame(() => {
         fixLazyImages();
 
+        layoutButton();
+
         pending = false;
       });
     });
@@ -231,6 +234,8 @@
 
     applyRootMode();
 
+    refreshMenu();
+
     alert(`视频：${videoEnabled ? "开启" : "关闭"}`);
   }
 
@@ -240,6 +245,8 @@
     GM_setValue(svgKey, svgEnabled);
 
     applyRootMode();
+
+    refreshMenu();
 
     alert(`SVG：${svgEnabled ? "开启" : "关闭"}`);
   }
@@ -286,6 +293,10 @@
     document.body.appendChild(btn);
 
     updateButton();
+
+    layoutButton();
+
+    window.addEventListener("resize", layoutButton);
   }
 
   function updateButton() {
@@ -296,63 +307,86 @@
     }
   }
 
-  /* ---------------- 快捷键 ---------------- */
+  /* ---------------- 位置：避开自动翻页角标 ---------------- */
 
-  function registerHotkeys() {
-    document.addEventListener("keydown", (e) => {
-      // Alt + I
-      if (e.altKey && e.key.toLowerCase() === "i") {
-        e.preventDefault();
+  const autoPaginateBadgeId = "__autoPaginateBadge";
 
-        toggleMode();
-      }
+  const cornerOffset = 15;
 
-      // Alt + V
-      if (e.altKey && e.key.toLowerCase() === "v") {
-        e.preventDefault();
+  // 自动翻页角标也在右下角，存在时把图标叠到它上面，避免重叠
+  function layoutButton() {
+    const btn = document.getElementById("__imgToggleBtn");
 
-        toggleVideo();
-      }
+    if (!btn) return;
 
-      // Alt + S
-      if (e.altKey && e.key.toLowerCase() === "s") {
-        e.preventDefault();
+    const badge = document.getElementById(autoPaginateBadgeId);
 
-        toggleSvg();
-      }
-    });
+    const rect = badge ? badge.getBoundingClientRect() : null;
+
+    const bottom =
+      rect && rect.height > 0
+        ? window.innerHeight - rect.top + 8
+        : cornerOffset;
+
+    btn.style.bottom = `${bottom}px`;
   }
 
   /* ---------------- Menu ---------------- */
 
+  const menuCommandIds = [];
+
+  const supportsMenuUnregister = typeof GM_unregisterMenuCommand === "function";
+
+  // 拿不到菜单 id 时无法反注册，退化为只注册一次，避免菜单项重复堆积
+  let canRefreshMenu = supportsMenuUnregister;
+
   function registerMenu() {
-    modes.forEach((m) => {
-      GM_registerMenuCommand(`模式: ${m}`, () => setMode(m));
-    });
+    const add = (caption, onClick) => {
+      const id = GM_registerMenuCommand(caption, onClick);
 
-    GM_registerMenuCommand(`视频: ${videoEnabled ? "开" : "关"}`, toggleVideo);
+      if (id === undefined || id === null) canRefreshMenu = false;
 
-    GM_registerMenuCommand(`SVG: ${svgEnabled ? "开" : "关"}`, toggleSvg);
+      else menuCommandIds.push(id);
+    };
 
-    GM_registerMenuCommand("重置", () => {
-      GM_deleteValue(siteKey);
+    modes.forEach((m) => add(`模式: ${m}`, () => setMode(m)));
 
-      GM_deleteValue(videoKey);
+    add(`视频: ${videoEnabled ? "开" : "关"}`, toggleVideo);
 
-      GM_deleteValue(svgKey);
+    add(`SVG: ${svgEnabled ? "开" : "关"}`, toggleSvg);
 
-      mode = defaultMode;
+    add("重置", reset);
+  }
 
-      videoEnabled = true;
+  // 先反注册旧菜单项再重新注册，让「视频/SVG」标签跟随最新状态
+  function refreshMenu() {
+    if (!canRefreshMenu) return;
 
-      svgEnabled = true;
+    menuCommandIds.splice(0).forEach((id) => GM_unregisterMenuCommand(id));
 
-      applyRootMode();
+    registerMenu();
+  }
 
-      updateButton();
+  function reset() {
+    GM_deleteValue(siteKey);
 
-      alert("已重置");
-    });
+    GM_deleteValue(videoKey);
+
+    GM_deleteValue(svgKey);
+
+    mode = defaultMode;
+
+    videoEnabled = true;
+
+    svgEnabled = true;
+
+    applyRootMode();
+
+    updateButton();
+
+    refreshMenu();
+
+    alert("已重置");
   }
 
   /* ---------------- Init ---------------- */
@@ -365,8 +399,6 @@
     createButton();
 
     registerMenu();
-
-    registerHotkeys();
 
     observe();
 
