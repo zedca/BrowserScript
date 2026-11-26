@@ -1,7 +1,6 @@
 // ==UserScript==
 // @name         Web Image Manager
-// @namespace    http://tampermonkey.net/
-// @version      1.0.4
+// @version      1.0.5
 // @description  稳定版图片/视频/SVG控制
 // @author       You
 // @match        *://*/*
@@ -10,9 +9,15 @@
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
-// @namespace    https://github.com/zedca/PublicScript/
-// @downloadURL  https://github.com/zedca/PublicScript/raw/main/web-image-manager.user.js
-// @updateURL    https://github.com/zedca/PublicScript/raw/main/web-image-manager.user.js
+// @grant        GM_xmlhttpRequest
+// @grant        GM_openInTab
+// @connect      raw.githubusercontent.com
+// @connect      github.com
+// @connect      cdn.jsdelivr.net
+// @connect      purge.jsdelivr.net
+// @namespace    https://github.com/zedca/BrowserScript/
+// @downloadURL  https://github.com/zedca/BrowserScript/raw/main/web-image-manager.user.js
+// @updateURL    https://github.com/zedca/BrowserScript/raw/main/web-image-manager.user.js
 // ==/UserScript==
 
 (function () {
@@ -331,6 +336,186 @@
     btn.style.bottom = `${bottom}px`;
   }
 
+  /* ---------------- 更新 ---------------- */
+
+  const LOG = "[Web Image Manager]";
+
+  function log(...args) {
+    try {
+      console.debug(LOG, ...args);
+    } catch (e) {
+      /* 忽略 */
+    }
+  }
+
+  // 和脚本头部的 @updateURL 保持一致
+  const SCRIPT_PAGE =
+    "https://github.com/zedca/BrowserScript/raw/main/web-image-manager.user.js";
+
+  const JSDELIVR_SCRIPT =
+    "https://cdn.jsdelivr.net/gh/zedca/BrowserScript@main/web-image-manager.user.js";
+  const PURGE_URL =
+    "https://purge.jsdelivr.net/gh/zedca/BrowserScript@main/web-image-manager.user.js";
+
+  // 取新版本用：GitHub raw 更新最及时，jsDelivr 当备用线路（分支内容会缓存一段时间）
+  const SCRIPT_SOURCES = [
+    "https://raw.githubusercontent.com/zedca/BrowserScript/main/web-image-manager.user.js",
+    SCRIPT_PAGE,
+    JSDELIVR_SCRIPT,
+  ];
+
+  // 油猴没给 GM_info 时用它兜底（记得和头部的 @version 一起改）
+  const FALLBACK_VERSION = "1.0.5";
+
+  function localVersion() {
+    try {
+      const version =
+        typeof GM_info !== "undefined" &&
+        GM_info &&
+        GM_info.script &&
+        GM_info.script.version;
+
+      if (version) return version;
+    } catch (e) {
+      log("读取脚本版本失败:", e);
+    }
+
+    return FALLBACK_VERSION;
+  }
+
+  function requestText(url) {
+    return new Promise((resolve, reject) => {
+      // 页面自己的 fetch 会被 CSP 拦住，优先走油猴的请求
+      if (typeof GM_xmlhttpRequest !== "function") {
+        fetch(url, { cache: "no-store" })
+          .then((res) =>
+            res.ok
+              ? res.text()
+              : Promise.reject(new Error(`HTTP ${res.status}`)),
+          )
+          .then(resolve, reject);
+
+        return;
+      }
+
+      GM_xmlhttpRequest({
+        method: "GET",
+        url,
+        timeout: 15000,
+        onload: (res) => {
+          if (res.status >= 200 && res.status < 300) resolve(res.responseText);
+          else reject(new Error(`HTTP ${res.status}`));
+        },
+        onerror: () => reject(new Error("网络错误")),
+        ontimeout: () => reject(new Error("超时")),
+      });
+    });
+  }
+
+  async function fetchRemoteScript() {
+    for (const url of SCRIPT_SOURCES) {
+      try {
+        const text = await requestText(url);
+
+        if (text && text.includes("@version")) return { url, text };
+      } catch (e) {
+        log("更新脚本：下载失败", url, e);
+      }
+    }
+
+    return null;
+  }
+
+  // raw.githubusercontent 的 CDN 会把文件缓存约 5 分钟，刚提交的版本可能还看不到。
+  // 这种情况下让 jsDelivr 刷新一次缓存再取，免得把新版误报成“已是最新”。
+  async function fetchRemoteScriptFresh() {
+    const remote = await fetchRemoteScript();
+
+    if (remote && isNewer(parseVersion(remote.text), localVersion())) {
+      return { ...remote, verified: true };
+    }
+
+    try {
+      await requestText(PURGE_URL);
+
+      const text = await requestText(JSDELIVR_SCRIPT);
+
+      if (text && text.includes("@version")) {
+        return { url: JSDELIVR_SCRIPT, text, verified: true };
+      }
+    } catch (e) {
+      log("更新脚本：刷新 jsDelivr 缓存失败", e);
+    }
+
+    return remote && { ...remote, verified: false };
+  }
+
+  function parseVersion(text) {
+    const match = /^\/\/\s*@version\s+(\S+)/m.exec(text);
+
+    return match ? match[1] : "";
+  }
+
+  // 逐段按数字比较，1.2.10 比 1.2.9 新
+  function isNewer(remote, local) {
+    const a = String(remote).split(".");
+    const b = String(local).split(".");
+
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      const x = parseInt(a[i], 10) || 0;
+      const y = parseInt(b[i], 10) || 0;
+
+      if (x !== y) return x > y;
+    }
+
+    return false;
+  }
+
+  function openScriptPage(url) {
+    try {
+      if (typeof GM_openInTab === "function") {
+        GM_openInTab(url, { active: true, insert: true });
+
+        return;
+      }
+    } catch (e) {
+      log("打开脚本页面失败:", e);
+    }
+
+    window.open(url, "_blank");
+  }
+
+  async function checkUpdate() {
+    const local = localVersion();
+
+    const remote = await fetchRemoteScriptFresh();
+
+    if (!remote) {
+      alert(
+        `检查更新失败（下载不到脚本）\n当前版本：v${local}\n可以手动打开下面的地址：\n${SCRIPT_PAGE}`,
+      );
+
+      return;
+    }
+
+    const version = parseVersion(remote.text);
+
+    if (!version || !isNewer(version, local)) {
+      alert(
+        remote.verified
+          ? `已是最新版本：v${local}`
+          : `暂未发现新版本：v${local}\n（GitHub 的文件缓存约 5 分钟，刚提交的版本可能还没生效）`,
+      );
+
+      return;
+    }
+
+    if (!confirm(`发现新版本：v${version}（当前 v${local}）\n\n打开安装页更新？`)) return;
+
+    // 直接打开 .user.js，剩下交给油猴的安装页面
+    openScriptPage(SCRIPT_PAGE);
+  }
+
   /* ---------------- Menu ---------------- */
 
   const menuCommandIds = [];
@@ -354,6 +539,8 @@
     add(`视频: ${videoEnabled ? "开" : "关"}`, toggleVideo);
 
     add(`SVG: ${svgEnabled ? "开" : "关"}`, toggleSvg);
+
+    add(`更新脚本（当前 v${localVersion()}）`, checkUpdate);
 
     add("重置", reset);
   }
